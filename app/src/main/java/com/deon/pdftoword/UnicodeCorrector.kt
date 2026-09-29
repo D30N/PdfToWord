@@ -2,9 +2,13 @@ package com.deon.pdftoword
 
 import com.tom_roush.fontbox.ttf.CmapSubtable
 import com.tom_roush.fontbox.ttf.TTFParser
+import com.tom_roush.pdfbox.cos.COSDictionary
 import com.tom_roush.pdfbox.cos.COSName
+import com.tom_roush.pdfbox.cos.COSNumber
+import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.font.PDFont
 import com.tom_roush.pdfbox.pdmodel.font.PDType0Font
+import com.tom_roush.pdfbox.pdmodel.font.PDType1Font
 import java.io.ByteArrayInputStream
 
 /**
@@ -55,6 +59,14 @@ class UnicodeCorrector {
     private val correctionCache = HashMap<Pair<PDFont, Int>, String>()
 
     /**
+     * Document-level ML-Karthika map: font NAME -> (code -> Unicode).
+     * Built by [buildMlKarthikaMap] from the COS /Differences arrays.
+     * This is the reliable path for ML-Karthika Type1 fonts.
+     * Keyed by font name (String) to avoid PDFont equality issues.
+     */
+    private val mlKarthikaCodeMap = HashMap<String, Map<Int, String>>()
+
+    /**
      * Cross-font consensus overrides: familyKey -> CID -> corrected unicode.
      * Built by [buildConsensus] from a pre-pass over the document. Only
      * contains CIDs where sibling fonts (same family, same subset CID order)
@@ -66,6 +78,89 @@ class UnicodeCorrector {
     /** Corrected unicode string for the given font + character code (CID). */
     fun corrected(font: PDFont, code: Int): String {
         return correctionCache.getOrPut(font to code) { compute(font, code) }
+    }
+
+    /**
+     * Document-level scan for ML-Karthika Type1 fonts. Builds a direct
+     * (font object -> code -> Unicode) map by parsing each font's
+     * /Encoding /Differences array from the COS dictionary.
+     *
+     * This is the RELIABLE path: it does not depend on PDFBox's Encoding
+     * API working correctly for these fonts. Call once per document
+     * before extraction.
+     */
+    fun buildMlKarthikaMap(doc: PDDocument) {
+        mlKarthikaCodeMap.clear()
+        try {
+            val seenNames = HashSet<String>()
+            for (page in doc.pages) {
+                val resources = try { page.resources } catch (e: Exception) { continue }
+                    ?: continue
+                val fontNames = try { resources.fontNames } catch (e: Exception) { continue }
+                    ?: continue
+                for (fontName in fontNames) {
+                    val font = try { resources.getFont(fontName) } catch (e: Exception) { null }
+                        ?: continue
+                    val name = try { font.name ?: "" } catch (e: Exception) { "" }
+                    if (!name.contains("ML-Karthika", ignoreCase = true)) continue
+                    if (!seenNames.add(name)) continue
+                    val isBold = name.contains("Bold", ignoreCase = true)
+                    val codeMap = parseDifferencesToUnicode(font, isBold) ?: continue
+                    if (codeMap.isNotEmpty()) {
+                        mlKarthikaCodeMap[name] = codeMap
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // Non-fatal: per-glyph lookup will try other paths.
+        }
+    }
+
+    /**
+     * Parses a font's /Encoding /Differences array and returns
+     * code -> Unicode string, using [MlKarthikaMap] for glyph names.
+     */
+    private fun parseDifferencesToUnicode(font: PDFont, isBold: Boolean): Map<Int, String>? {
+        return try {
+            val cosDict = font.cosObject as? COSDictionary ?: return null
+            val encObj = cosDict.getDictionaryObject(COSName.getPDFName("Encoding"))
+                ?: return null
+            val encDict = encObj as? COSDictionary ?: return null
+            val diffArray = encDict.getCOSArray(COSName.getPDFName("Differences"))
+                ?: return null
+
+            val result = HashMap<Int, String>()
+            var curCode = -1
+            val iter = diffArray.iterator()
+            while (iter.hasNext()) {
+                val obj = iter.next()
+                when (obj) {
+                    is COSNumber -> curCode = obj.intValue()
+                    is COSName -> {
+                        // getName() returns the raw glyph name (e.g. "nbspace").
+                        // toString() returns "COSName{nbspace}" — NOT usable.
+                        val glyphName = try { obj.getName() } catch (e: Exception) { null }
+                        if (glyphName == null) {
+                            curCode++
+                            continue
+                        }
+                        val unicode = if (isBold) {
+                            MlKarthikaMap.BOLD[glyphName]
+                                ?: MlKarthikaMap.NORMAL[glyphName]
+                        } else {
+                            MlKarthikaMap.NORMAL[glyphName]
+                        }
+                        if (unicode != null && curCode >= 0) {
+                            result[curCode] = unicode
+                        }
+                        curCode++
+                    }
+                }
+            }
+            result
+        } catch (e: Exception) {
+            null
+        }
     }
 
     /**
@@ -115,7 +210,95 @@ class UnicodeCorrector {
         )
     }
 
+    /**
+     * ML-Karthika Type1 font lookup: these fonts (GBIDGA+ML-Karthika-Normal,
+     * GBIDGB+ML-Karthika-Bold) use a fake Latin /Differences encoding with
+     * corrupt ToUnicode. We map by glyph name using the reverse-engineered
+     * table in [MlKarthikaMap]. Returns null if not an ML-Karthika font or
+     * the glyph is not in the map (caller falls back to ToUnicode).
+     *
+     * The glyph name is read DIRECTLY from the font's /Encoding /Differences
+     * array in the COS dictionary (most reliable across PDFBox forks),
+     * with the high-level Encoding API as fallback.
+     */
+    private fun mlKarthikaLookup(font: PDFont, code: Int): String? {
+        try {
+            if (font !is PDType1Font) return null
+            val name = try { font.name ?: "" } catch (e: Exception) { "" }
+            if (!name.contains("ML-Karthika", ignoreCase = true)) return null
+            val isBold = name.contains("Bold", ignoreCase = true)
+
+            // 1. Try reading /Differences directly from COS dictionary.
+            var glyphName: String? = readDifferencesGlyphName(font, code)
+
+            // 2. Fallback: high-level Encoding API.
+            // Note: Encoding.getName(code) already returns the glyph name String.
+            if (glyphName == null) {
+                glyphName = try {
+                    val encoding = font.encoding ?: return null
+                    encoding.getName(code)
+                } catch (e: Exception) { null }
+            }
+            if (glyphName == null) return null
+
+            // Try bold map first, fallback to normal map.
+            if (isBold) {
+                MlKarthikaMap.BOLD[glyphName]?.let { return it }
+            }
+            return MlKarthikaMap.NORMAL[glyphName]
+        } catch (e: Exception) {
+            return null
+        }
+    }
+
+    /**
+     * Reads the glyph name for [code] directly from the font's
+     * /Encoding /Differences array in the COS dictionary.
+     */
+    private fun readDifferencesGlyphName(font: PDType1Font, code: Int): String? {
+        return try {
+            val cosDict = font.cosObject ?: return null
+            val encObj = cosDict.getDictionaryObject(COSName.getPDFName("Encoding"))
+                ?: return null
+            val encDict = encObj as? com.tom_roush.pdfbox.cos.COSDictionary
+                ?: return null
+            val diffArray = encDict.getCOSArray(COSName.getPDFName("Differences"))
+                ?: return null
+
+            // Walk the Differences array: [code, /name, /name, ..., code, /name, ...]
+            var curCode = -1
+            val iter = diffArray.iterator()
+            while (iter.hasNext()) {
+                val obj = iter.next()
+                if (obj is com.tom_roush.pdfbox.cos.COSNumber) {
+                    curCode = obj.intValue()
+                } else if (obj is COSName) {
+                    if (curCode == code) {
+                        // getName() returns raw name; toString() gives "COSName{name}".
+                        return try { obj.getName() } catch (e: Exception) { null }
+                    }
+                    curCode++
+                }
+            }
+            null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private fun compute(font: PDFont, code: Int): String {
+        // ML-Karthika Type1 fonts: document-level map (built from COS
+        // /Differences) is the reliable path. ToUnicode is corrupt.
+        // Keyed by font name to avoid PDFont equality issues.
+        val fontName = try { font.name ?: "" } catch (e: Exception) { "" }
+        if (fontName.contains("ML-Karthika", ignoreCase = true)) {
+            mlKarthikaCodeMap[fontName]?.get(code)?.let { return it }
+        }
+
+        // Per-glyph fallback (tries Encoding API).
+        val mlk = mlKarthikaLookup(font, code)
+        if (mlk != null) return mlk
+
         val fallback = try {
             font.toUnicode(code) ?: ""
         } catch (e: Exception) {

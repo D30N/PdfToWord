@@ -61,6 +61,7 @@ class MainActivity : Activity() {
     private var pdfName: String = ""
     private var keepOriginal = true
     private var pendingDownload: File? = null
+    private var convertMode = ConversionPipeline.Mode.AUTO
 
     private lateinit var selectedCard: LinearLayout
     private lateinit var selectedName: TextView
@@ -111,6 +112,35 @@ class MainActivity : Activity() {
         root.addView(buildBottomNav())
         setContentView(root)
         refreshRecents()
+        // Handle PDF shared from another app (share menu).
+        handleSharedPdf(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleSharedPdf(intent)
+    }
+
+    /** If launched via share menu with a PDF, start conversion directly. */
+    private fun handleSharedPdf(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_SEND) return
+        val uri: android.net.Uri? = if (android.os.Build.VERSION.SDK_INT >= 33) {
+            intent.getParcelableExtra(Intent.EXTRA_STREAM, android.net.Uri::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(Intent.EXTRA_STREAM)
+        }
+        if (uri == null) return
+        // Take persistable read permission so conversion can open it.
+        try {
+            contentResolver.takePersistableUriPermission(
+                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        } catch (e: Exception) { /* not all shares grant persistable */ }
+        pdfUri = uri
+        pdfName = queryDisplayName(uri) ?: "document.pdf"
+        showSelected()
     }
 
     override fun onResume() {
@@ -255,6 +285,74 @@ class MainActivity : Activity() {
             bottomMargin = dp(14)
         })
 
+        // Conversion mode selector: Auto / Text PDF / Scanned PDF (OCR)
+        val modeCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = getDrawable(R.drawable.bg_card)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+        }
+        modeCard.addView(TextView(this).apply {
+            text = "Conversion mode"
+            setTextColor(Color.parseColor(INK))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, 0, 0, dp(8))
+        })
+        val modeRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        val modeButtons = mutableListOf<Button>()
+        val modeDefs = listOf(
+            ConversionPipeline.Mode.AUTO to "Auto",
+            ConversionPipeline.Mode.TEXT to "Text PDF",
+            ConversionPipeline.Mode.SCANNED to "Scanned / OCR"
+        )
+        for ((m, label) in modeDefs) {
+            val b = Button(this).apply {
+                text = label
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                isAllCaps = false
+                setPadding(dp(8), dp(10), dp(8), dp(10))
+                setOnClickListener {
+                    convertMode = m
+                    for ((i, btn) in modeButtons.withIndex()) {
+                        val selected = modeDefs[i].first == convertMode
+                        btn.background = getDrawable(
+                            if (selected) R.drawable.bg_btn_green
+                            else R.drawable.bg_btn_green_disabled
+                        )
+                        btn.setTextColor(
+                            if (selected) Color.WHITE
+                            else Color.parseColor(GREY)
+                        )
+                    }
+                }
+            }
+            modeButtons.add(b)
+            modeRow.addView(b, LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                if (modeButtons.size > 1) leftMargin = dp(8)
+            })
+        }
+        // Default: Auto selected
+        modeButtons[0].background = getDrawable(R.drawable.bg_btn_green)
+        modeButtons[0].setTextColor(Color.WHITE)
+        for (i in 1 until modeButtons.size) {
+            modeButtons[i].background = getDrawable(R.drawable.bg_btn_green_disabled)
+            modeButtons[i].setTextColor(Color.parseColor(GREY))
+        }
+        modeCard.addView(modeRow)
+        modeCard.addView(TextView(this).apply {
+            text = "Auto detects text vs scanned pages. Scanned uses Malayalam OCR."
+            setTextColor(Color.parseColor(GREY))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setPadding(0, dp(6), 0, 0)
+        })
+        col.addView(modeCard, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(14)
+        })
+
         // Convert button
         convertBtn = Button(this).apply {
             text = "  Convert to Word file"
@@ -289,9 +387,8 @@ class MainActivity : Activity() {
 
         // Note
         col.addView(TextView(this).apply {
-            text = "Only text-based PDFs can be converted (where you can select the text). " +
-                "Scanned photo PDFs are not supported. Line spacing and the Malayalam font " +
-                "are always applied automatically."
+            text = "Text PDFs are extracted directly. Scanned photo PDFs use Malayalam OCR. " +
+                "Line spacing and the Malayalam font are always applied automatically."
             setTextColor(Color.parseColor("#7A5C00"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             background = getDrawable(R.drawable.bg_note)
@@ -377,10 +474,11 @@ class MainActivity : Activity() {
         })
         card.addView(TextView(this).apply {
             text = "Converts Malayalam PDFs to Word (.docx).\n\n" +
+                "• Auto / Text PDF / Scanned (OCR) modes\n" +
+                "• Malayalam OCR with image preprocessing\n" +
                 "• Line spacing is preserved from the PDF\n" +
                 "• Malayalam font is always applied\n" +
-                "• Files are saved to your Downloads folder\n\n" +
-                "Only text-based PDFs are supported."
+                "• Files are saved to your Downloads folder"
             setTextColor(Color.parseColor(GREY))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             setLineSpacing(dp(3).toFloat(), 1f)
@@ -673,9 +771,10 @@ class MainActivity : Activity() {
         val uri = pdfUri ?: return
         convertBtn.isEnabled = false
 
-        // Progress dialog: big % + horizontal bar + current page.
+        // Progress dialog: stage name + big % + horizontal bar + detail line.
         lateinit var pctText: TextView
         lateinit var bar: ProgressBar
+        lateinit var stageText: TextView
         lateinit var statusText: TextView
         val dlgView = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -688,7 +787,7 @@ class MainActivity : Activity() {
                 setPadding(0, 0, 0, dp(2))
             })
             addView(TextView(this@MainActivity).apply {
-                text = pdfName
+                text = "$pdfName • ${modeLabel(convertMode)}"
                 setTextColor(Color.parseColor(GREY))
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                 setPadding(0, 0, 0, dp(10))
@@ -731,8 +830,16 @@ class MainActivity : Activity() {
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(16)).apply {
                 bottomMargin = dp(10)
             })
-            statusText = TextView(this@MainActivity).apply {
+            stageText = TextView(this@MainActivity).apply {
                 text = "Starting…"
+                setTextColor(Color.parseColor(INK))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                typeface = Typeface.DEFAULT_BOLD
+                setPadding(0, 0, 0, dp(2))
+            }
+            addView(stageText)
+            statusText = TextView(this@MainActivity).apply {
+                text = ""
                 setTextColor(Color.parseColor(GREY))
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             }
@@ -745,31 +852,45 @@ class MainActivity : Activity() {
         dlg.show()
 
         thread {
-            var stage = "reading"
+            var stageName = "reading"
             try {
-                val blocks = contentResolver.openInputStream(uri)?.use { ins ->
-                    PdfTextExtractor().extract(ins) { done, total ->
-                        val pages = (total / 2).coerceAtLeast(1)
-                        val page = (done - 1) % pages + 1
-                        val pct = (done * 100 / total).coerceIn(0, 100)
-                        runOnUiThread {
-                            pctText.text = "$pct%"
-                            bar.progress = pct
-                            statusText.text = "Reading page $page of $pages…"
-                        }
+                // Copy PDF to a temp file (pipeline needs a File)
+                val tmpPdf = File(cacheDir, "convert-input.pdf")
+                contentResolver.openInputStream(uri)?.use { ins ->
+                    FileOutputStream(tmpPdf).use { out -> ins.copyTo(out) }
+                } ?: throw Exception("Could not open PDF")
+
+                val pipeline = ConversionPipeline(this)
+                val result = pipeline.convert(tmpPdf, convertMode) { p ->
+                    runOnUiThread {
+                        pctText.text = "${p.percent}%"
+                        bar.progress = p.percent
+                        stageText.text = "${p.stage}. ${p.stageName}"
+                        statusText.text = p.detail
                     }
-                } ?: emptyList()
-                runOnUiThread {
-                    pctText.text = "100%"
-                    bar.progress = 100
-                    statusText.text = "Writing Word file…"
                 }
+                stageName = "saving"
+
+                val blocks = result.blocks
                 val hasText = blocks.any {
                     it is DocBlock.Para && it.runs.any { r -> r.text.isNotBlank() }
                 }
                 if (!hasText) {
-                    failOnUi(dlg, "No text found in this PDF. Scanned PDFs are not supported.")
+                    val msg = if (result.detectedType == PdfTypeDetector.PdfType.SCANNED) {
+                        "OCR found no text in this scanned PDF. " +
+                            "Try a higher-quality scan."
+                    } else {
+                        "No text found in this PDF."
+                    }
+                    failOnUi(dlg, msg)
                     return@thread
+                }
+
+                runOnUiThread {
+                    pctText.text = "100%"
+                    bar.progress = 100
+                    stageText.text = "Writing Word file…"
+                    statusText.text = ""
                 }
                 val base = pdfName.substringBeforeLast('.', pdfName)
                     .ifBlank { "document" }
@@ -784,23 +905,27 @@ class MainActivity : Activity() {
                     n++
                 }
                 FileOutputStream(outFile).use { DocxWriter.write(blocks, it) }
-                stage = "saving"
                 saveToDownloads(outFile)
                 RecentStore.add(this, outFile.name, outFile.name)
+                try { tmpPdf.delete() } catch (_: Exception) {}
                 runOnUiThread {
                     dlg.dismiss()
                     convertBtn.isEnabled = true
                     refreshRecents()
-                    showDone(outFile)
+                    showDone(outFile, result)
                 }
             } catch (e: SecurityException) {
                 failOnUi(dlg, "This PDF is password protected.")
             } catch (e: Throwable) {
-                // Throwable (not just Exception): Errors like StackOverflowError /
-                // NoClassDefFoundError used to force-close the app with no message.
-                failOnUi(dlg, "Failed while $stage: ${e.message ?: e.javaClass.simpleName}", e)
+                failOnUi(dlg, "Failed while $stageName: ${e.message ?: e.javaClass.simpleName}", e)
             }
         }
+    }
+
+    private fun modeLabel(mode: ConversionPipeline.Mode): String = when (mode) {
+        ConversionPipeline.Mode.AUTO -> "Auto"
+        ConversionPipeline.Mode.TEXT -> "Text PDF"
+        ConversionPipeline.Mode.SCANNED -> "Scanned / OCR"
     }
 
     private fun failOnUi(dlg: AlertDialog, msg: String, err: Throwable? = null) {
@@ -827,10 +952,30 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun showDone(file: File) {
+    private fun showDone(file: File, result: ConversionPipeline.Result? = null) {
+        val stats = if (result != null) {
+            val typeStr = if (result.detectedType == PdfTypeDetector.PdfType.TEXT) {
+                "Text PDF (direct extraction)"
+            } else {
+                "Scanned PDF (Malayalam OCR)"
+            }
+            val langStr = when (result.detectedLanguage) {
+                "ml" -> "Malayalam"
+                "en" -> "English"
+                "ml+en" -> "Malayalam + English"
+                else -> "Unknown"
+            }
+            val confStr = if (result.ocrConfidence != null) {
+                "\nOCR confidence: ${result.ocrConfidence}%"
+            } else ""
+            "\n\n$typeStr\nPages: ${result.pageCount}\n" +
+                "Language: $langStr$confStr\n" +
+                "Words: ${result.wordCount}\n" +
+                "Malayalam: ${result.malayalamPercent.toInt()}%"
+        } else ""
         AlertDialog.Builder(this)
             .setTitle("Converted")
-            .setMessage("${file.name} saved to Downloads.")
+            .setMessage("${file.name} saved to Downloads.$stats")
             .setPositiveButton("Open") { _, _ -> openFile(file) }
             .setNeutralButton("Share") { _, _ -> shareFile(file) }
             .setNegativeButton("OK", null)

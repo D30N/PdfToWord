@@ -11,7 +11,7 @@ android {
         applicationId = "com.deon.pdftoword"
         minSdk = 26
         targetSdk = 34
-        versionCode = 11
+        versionCode = 20
         versionName = "1.0"
     }
 
@@ -58,4 +58,5 @@ android {
 dependencies {
     implementation("androidx.core:core:1.9.0")
     implementation(files("libs/pdfbox-android.aar"))
+    implementation(files("libs/tess-two.aar"))
 }

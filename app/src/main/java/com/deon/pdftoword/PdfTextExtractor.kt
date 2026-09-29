@@ -55,6 +55,12 @@ class PdfTextExtractor {
 
             val corrector = UnicodeCorrector()
 
+            // Build ML-Karthika code->Unicode map from COS /Differences.
+            // (Reliable path for ML-Karthika Type1 fonts with corrupt ToUnicode.)
+            try {
+                corrector.buildMlKarthikaMap(doc)
+            } catch (e: Exception) { /* non-fatal */ }
+
             // Pre-pass: collect raw ToUnicode per (font, CID) so the corrector
             // can build cross-font consensus for sporadically corrupt
             // ligature mappings (same subset CID order across sibling fonts).
@@ -232,7 +238,7 @@ class PdfTextExtractor {
                 onProgress?.invoke(pageCount + p, total)
             }
 
-            return buildBlocks(rawLines)
+            return MalayalamPostCorrector.correctBlocks(buildBlocks(rawLines))
         }
     }
 
