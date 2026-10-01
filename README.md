@@ -16,6 +16,7 @@ An Android app that converts Malayalam PDFs to Word (`.docx`) files — made sim
 
 | Home | Files | Settings |
 |------|-------|----------|
+| ![Home](screenshots/home.jpg) | ![Files](screenshots/files.jpg) | ![Settings](screenshots/settings.jpg) |
 
 ## How it works
 
