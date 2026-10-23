@@ -398,17 +398,16 @@ class MainActivity : Activity() {
 
         // Footer: made-by line with clickable Instagram handle
         col.addView(TextView(this).apply {
-            val handle = "@deepak.deon"
-            val full = "This app was made by $handle"
+            val full = "This app was made by Deon"
             val span = SpannableString(full)
-            val start = full.indexOf(handle)
+            val start = 0
             span.setSpan(object : ClickableSpan() {
                 override fun onClick(widget: View) {
                     runCatching {
                         startActivity(
                             Intent(
                                 Intent.ACTION_VIEW,
-                                Uri.parse("https://instagram.com/deepak.deon")
+                                Uri.parse("https://deepakdeon.github.io")
                             )
                         )
                     }
@@ -416,9 +415,9 @@ class MainActivity : Activity() {
 
                 override fun updateDrawState(ds: TextPaint) {
                     ds.color = Color.parseColor("#0097A7")
-                    ds.isUnderlineText = false
+                    ds.isUnderlineText = true
                 }
-            }, start, start + handle.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }, start, full.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             text = span
             movementMethod = LinkMovementMethod.getInstance()
             highlightColor = Color.TRANSPARENT
@@ -519,7 +518,7 @@ class MainActivity : Activity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             setLineSpacing(dp(3).toFloat(), 1f)
         })
-        // © Deepak Deon -> blue hyperlink to Instagram
+        // © Deepak Deon -> blue hyperlink to the website
         notice.addView(TextView(this).apply {
             val label = "© Deepak Deon"
             val span = SpannableString(label)
@@ -529,7 +528,7 @@ class MainActivity : Activity() {
                         startActivity(
                             Intent(
                                 Intent.ACTION_VIEW,
-                                Uri.parse("https://instagram.com/deepak.deon")
+                                Uri.parse("https://deepakdeon.github.io")
                             )
                         )
                     }

@@ -11,7 +11,7 @@ android {
         applicationId = "com.deon.pdftoword"
         minSdk = 26
         targetSdk = 34
-        versionCode = 20
+        versionCode = 22
         versionName = "1.0"
     }
 
@@ -31,6 +31,9 @@ android {
         debug {
             signingConfig = signingConfigs.getByName("pinnedDebug")
         }
+    }
+    lint {
+        checkReleaseBuilds = false
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
