@@ -82,6 +82,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        recordAnalytics()
         // Required by PdfBox-Android: lets it load its bundled resources
         // (glyphlist.txt etc.) from the APK's assets.
         PDFBoxResourceLoader.init(applicationContext)
