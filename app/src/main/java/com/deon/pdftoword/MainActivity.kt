@@ -112,6 +112,7 @@ class MainActivity : Activity() {
         root.addView(buildBottomNav())
         setContentView(root)
         refreshRecents()
+        UpdateCheck.autoCheck(this)
         // Handle PDF shared from another app (share menu).
         handleSharedPdf(intent)
     }
@@ -481,6 +482,14 @@ class MainActivity : Activity() {
             setTextColor(Color.parseColor(GREY))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             setLineSpacing(dp(3).toFloat(), 1f)
+        })
+        card.addView(Button(this).apply {
+            text = "Check for updates"
+            setOnClickListener { UpdateCheck.check(this@MainActivity, manual = true) }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(12) }
         })
         col.addView(card)
 
